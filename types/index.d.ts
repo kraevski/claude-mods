@@ -13,7 +13,7 @@ export type QueueItem = {
 export type QueueGate = {
   mainTurn: 'running' | 'idle'
   backgroundTasks: { type: string; description: string }[]
-  paused?: 'aborted' | 'command' | 'error' | 'refusal' | 'restored' | 'user'
+  paused?: 'aborted' | 'command' | 'dropped' | 'error' | 'refusal' | 'restored' | 'user'
   // True from a send until the Stop that ends its turn: one item per Stop.
   awaitingStop: boolean
   // Set while the command being sent has raised a prompt.submit, so its turn's Stop ends the send.

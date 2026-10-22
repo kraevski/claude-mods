@@ -30,7 +30,9 @@ In the desktop app, where `/plugin` does not run: click + next to the prompt box
 
 Under your `/queue` line, a colored `Queued #1` pill shows the message's place and what it waits for. Once the message goes out, the pill turns to `✓ Sent`. It is sent as your own words. `/queue` with no message shows its usage line.
 
-The band above the prompt shows how many messages wait and what they wait for. It lists the first three, and counts the rest. Each row has **Send now** and **Remove**. Point at a row to get **↑**, **↓** and **Edit** as well. Pointing at a `Queued #n` pill gives Send now, Edit and Remove too. The band is hidden when nothing waits, unless you paused the queue.
+The band above the prompt shows how many messages wait and what they wait for. It lists the first three, and counts the rest. Each row has **Send now** and **Remove**. Point at a row to get **↑**, **↓** and **Edit** as well. Pointing at a `Queued #n` pill gives Send now, Edit and Remove too. The band is hidden when nothing waits, unless you paused the queue. Other plugins' bands stay in view, under the queue's rows.
+
+In the desktop app, the band and the pill are drawn in the app's own type and colors, light or dark: the band's header shows a slot per waiting message, and each pill shows its message's slot among them.
 
 Queue as many messages as you like. They go out one at a time, in the order you queued them.
 
@@ -74,11 +76,11 @@ The queue pauses when:
 - you press Esc during a turn, and something is queued;
 - a turn ends on an API error or a refusal, and something is queued;
 - a queued command fails to run;
-- a message could not be sent;
+- a message could not be sent, or Claude Code did not take it (the message stays queued, and a toast says why);
 - a restart or `/clear` brings messages back (see How it works);
 - you run `/queue pause`.
 
-The band says why, and shows **Resume** while paused. `/queue resume` or **Resume** continues. Emptying the queue ends a pause from an interrupt, an error, a refusal, a failed command, or a restore. It does not end a `/queue pause`.
+The band says why, and shows **Resume** while paused. `/queue resume` or **Resume** continues. Emptying the queue ends a pause from an interrupt, an error, a refusal, a failed command, a message Claude Code did not take, or a restore. It does not end a `/queue pause`.
 
 ## How it works
 

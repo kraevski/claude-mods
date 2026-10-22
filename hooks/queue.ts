@@ -95,6 +95,13 @@ export const markFailed = (state: QueueState, id: string): QueueState => {
   return { ...state, items, gate: { ...state.gate, paused: 'error', awaitingStop: false } }
 }
 
+// A send Claude Code refused (a `drop`) never entered, so the items go back to waiting, unflagged, and the queue
+// pauses on them. No turn starts, so no Stop is coming: the wait for one ends here.
+export const markDropped = (state: QueueState, ids: string[]): QueueState => {
+  const items = state.items.map(x => (ids.includes(x.id) ? { ...x, status: 'waiting' as const } : x))
+  return { ...state, items, gate: { ...state.gate, paused: 'dropped', awaitingStop: false } }
+}
+
 // A command that failed to run never ran, so the item goes back to waiting, first in line, and the queue pauses on it.
 // Resuming retries it; removing it drops it.
 export const markCommandFailed = (state: QueueState, id: string): QueueState => {
@@ -182,6 +189,7 @@ const releaseIfEmptied = (state: QueueState): QueueState => {
   const isReleasable =
     state.gate.paused === 'aborted' ||
     state.gate.paused === 'command' ||
+    state.gate.paused === 'dropped' ||
     state.gate.paused === 'error' ||
     state.gate.paused === 'refusal' ||
     state.gate.paused === 'restored'

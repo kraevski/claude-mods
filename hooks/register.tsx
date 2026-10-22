@@ -4,6 +4,8 @@ import { atom, read } from 'claude-code'
 import type { QueueItem, QueueState } from '../types'
 import type { Ref } from './command'
 import { parse, refText } from './command'
+import type { Pill, Tone } from './draw'
+import { HEADER_H, PILL_H, ROW_H, headerSvg, pillSvg, rowSvg } from './draw'
 import {
   add,
   claimBatch,
@@ -21,6 +23,7 @@ import {
   markCommandDone,
   markCommandFailed,
   markCommandTurn,
+  markDropped,
   markFailed,
   markSent,
   moveItem,
@@ -54,6 +57,12 @@ const BAND_ROWS = 3
 
 // The queue's color, from the person's theme: the band's pill and numbers, and the reply row's pill.
 const ACCENT = 'suggestion'
+
+// About 8 CSS px per reported column on a desktop. A row's drawing leaves room for all its buttons, the ones the
+// pointer reveals included, so revealing them never wraps the row.
+const PX_PER_COLUMN = 8
+const ROW_BUTTONS_PX = 300
+const RESUME_PX = 96
 
 // The `joined` option, read in register: the drain sends the waiting prompts as one message.
 let joined = false
@@ -200,9 +209,17 @@ const deliver = ($: EngineInterface, batch: QueueItem[]): Promise<void> => {
 }
 
 // A batch's prompts go out as one message, separated by blank lines. The batch's Stop releases the next one.
+// A submit can resolve as a `drop`: the prompt did not enter and no turn starts, so the items stay queued.
 const sendPrompt = ($: EngineInterface, batch: QueueItem[]): Promise<void> =>
   $.prompt.submit({ text: batch.map(x => x.text).join('\n\n'), asUser: true }).then(
-    () => modify($, s => batch.reduce((acc, x) => markSent(acc, x.id), s)).then(() => undefined),
+    async result => {
+      if (result.drop !== undefined) {
+        await modify($, s => markDropped(s, batch.map(x => x.id)))
+        void $.ui.toast(`Claude Code did not take the queued message (${result.drop}). The queue is paused.`)
+        return
+      }
+      await modify($, s => batch.reduce((acc, x) => markSent(acc, x.id), s))
+    },
     () => {
       void modify($, s => batch.reduce((acc, x) => markFailed(acc, x.id), s))
       void $.ui.toast('The queued message could not be sent. The queue is paused.')
@@ -305,6 +322,7 @@ const outOfRange = (ref: Ref): string => `No queued message ${refText(ref)}. /qu
 const PAUSE_REASON = {
   aborted: 'you interrupted Claude',
   command: 'a queued command failed',
+  dropped: 'Claude Code did not take the last message',
   error: 'an API error stopped the last turn',
   refusal: 'Claude refused the last message',
   restored: 'kept from before a restart or /clear',
@@ -494,7 +512,7 @@ export const register: Register = (on, options) => {
 
   // The band above the prompt: a summary, the first few messages, and Resume while paused. Each row keeps Send now
   // and Remove in view; the pointer on a row adds Up, Down and Edit. It reads the state only, so a redraw costs no
-  // engine calls.
+  // engine calls. Other plugins' bands are drawn beneath it.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     // A survey holds the band; the queue yields to it.
     if (e.props.hasSurvey) return next(e)
@@ -504,8 +522,78 @@ export const register: Register = (on, options) => {
     // Empty, the band stays hidden unless the person paused on purpose.
     if (queued.length === 0 && state.gate.paused !== 'user') return next(e)
 
-    const { Box, Button, Text } = $.ui.resolve(e)
+    // Claude Code's own placeholder ({ type: 'engine' }) is never nested: the desktop drops a band that nests it.
+    const drawn = await Promise.resolve(next(e)).catch(() => null)
+    const below = drawn && typeof drawn === 'object' && (drawn as { type?: string }).type !== 'engine' ? drawn : null
+
+    const ui = $.ui.resolve(e)
+    const { Box, Button, Text } = ui
     const shown = queued.slice(0, BAND_ROWS)
+    const summary = `${queued.length} waiting · ${waitingOn(state)}`
+    const resumeButton =
+      state.gate.paused !== undefined ? (
+        <Button key="resume" label="Resume" variant="primary" onPress={() => void resumeFromBand($)} />
+      ) : null
+    const rowButtons = (x: QueueItem, i: number) => (
+      <Box flexShrink={0} gap={1}>
+        <Box display="none" hover={{ display: 'flex' }} gap={1}>
+          {i > 0 ? <Button key={`up-${x.id}`} label="↑" dimColor onPress={() => void moveFromBand($, x.id, -1)} /> : null}
+          {i < queued.length - 1 ? (
+            <Button key={`down-${x.id}`} label="↓" dimColor onPress={() => void moveFromBand($, x.id, 1)} />
+          ) : null}
+          <Button key={`edit-${x.id}`} label="Edit" dimColor onPress={() => void editFromBand($, x.id)} />
+        </Box>
+        <Button
+          key={`send-${x.id}`}
+          label="Send now"
+          variant={i === 0 ? 'primary' : undefined}
+          onPress={() => void sendFromBand($, x.id)}
+        />
+        <Button key={`remove-${x.id}`} label="Remove" dimColor onPress={() => void removeFromBand($, x.id)} />
+      </Box>
+    )
+
+    // The terminal's element table is completed with an `Svg` that draws nothing: test the surface too.
+    if (e.surface !== 'terminal' && 'Svg' in ui) {
+      const { Svg } = ui
+      const slot = Math.max(240, Math.min(1600, (e.props.bodyColumns || 100) * PX_PER_COLUMN))
+      const tone: Tone = state.gate.paused !== undefined ? 'w' : 'a'
+      const isLive =
+        state.gate.paused === undefined &&
+        (state.gate.mainTurn === 'running' || state.gate.awaitingStop || state.gate.backgroundTasks.length > 0)
+      const headerW = slot - (resumeButton ? RESUME_PX : 0)
+      const rowW = Math.max(160, slot - ROW_BUTTONS_PX)
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Box alignItems="center" justifyContent="space-between" gap={1}>
+            <Svg
+              source={headerSvg(headerW, queued.length, summary, tone, isLive)}
+              alt={`Queue: ${summary}`}
+              width={headerW}
+              height={HEADER_H}
+            />
+            {resumeButton}
+          </Box>
+          {shown.map((x, i) => (
+            <Box key={x.id} alignItems="center" justifyContent="space-between" gap={1}>
+              <Svg
+                source={rowSvg(rowW, i + 1, x.text, {
+                  isCommand: x.kind === 'command',
+                  isDim: x.status !== 'waiting',
+                  maybeSent: x.maybeSent === true,
+                })}
+                alt={`${i + 1}. ${x.text}${x.maybeSent ? ' (may have been sent)' : ''}`}
+                width={rowW}
+                height={ROW_H}
+              />
+              {rowButtons(x, i)}
+            </Box>
+          ))}
+          {queued.length > BAND_ROWS ? <Text dimColor>+{queued.length - BAND_ROWS} more</Text> : null}
+          {below}
+        </Box>
+      )
+    }
 
     // Each row: the number, the text cut at the edge, then the buttons, which keep their width. The text's Box
     // may shrink below its text's width, so a long message never pushes the buttons off the edge.
@@ -519,12 +607,10 @@ export const register: Register = (on, options) => {
           </Box>
           <Box flexGrow={1} flexShrink={1} minWidth={0}>
             <Text wrap="truncate-end" dimColor>
-              {queued.length} waiting · {waitingOn(state)}
+              {summary}
             </Text>
           </Box>
-          {state.gate.paused !== undefined ? (
-            <Button key="resume" label="Resume" variant="primary" onPress={() => void resumeFromBand($)} />
-          ) : null}
+          {resumeButton}
         </Box>
         {shown.map((x, i) => (
           <Box key={x.id} gap={1}>
@@ -543,27 +629,11 @@ export const register: Register = (on, options) => {
                 <Text dimColor>(may have been sent)</Text>
               </Box>
             ) : null}
-            <Box flexShrink={0} gap={1}>
-              <Box display="none" hover={{ display: 'flex' }} gap={1}>
-                {i > 0 ? (
-                  <Button key={`up-${x.id}`} label="↑" dimColor onPress={() => void moveFromBand($, x.id, -1)} />
-                ) : null}
-                {i < queued.length - 1 ? (
-                  <Button key={`down-${x.id}`} label="↓" dimColor onPress={() => void moveFromBand($, x.id, 1)} />
-                ) : null}
-                <Button key={`edit-${x.id}`} label="Edit" dimColor onPress={() => void editFromBand($, x.id)} />
-              </Box>
-              <Button
-                key={`send-${x.id}`}
-                label="Send now"
-                variant={i === 0 ? 'primary' : undefined}
-                onPress={() => void sendFromBand($, x.id)}
-              />
-              <Button key={`remove-${x.id}`} label="Remove" dimColor onPress={() => void removeFromBand($, x.id)} />
-            </Box>
+            {rowButtons(x, i)}
           </Box>
         ))}
         {queued.length > BAND_ROWS ? <Text dimColor>+{queued.length - BAND_ROWS} more</Text> : null}
+        {below}
       </Box>
     )
   })
@@ -584,80 +654,86 @@ export const register: Register = (on, options) => {
     const queuedText = match[2] ?? ''
     const state = await read($, queue)
     const entry = state.items.find(x => x.id === id)
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Button, Text } = ui
+    const editedText = entry !== undefined && entry.text !== queuedText ? entry.text : undefined
 
-    const pill = (label: string, color: string) => (
-      <Box flexShrink={0}>
-        <Text backgroundColor={color} color="inverseText" weight="semibold">
-          {` ${label} `}
-        </Text>
-      </Box>
-    )
-    const edited =
-      entry !== undefined && entry.text !== queuedText ? (
-        <Box flexGrow={1} flexShrink={1} minWidth={0}>
-          <Text wrap="truncate-end" dimColor>
-            now: {entry.text}
-          </Text>
-        </Box>
-      ) : null
-
+    // What the row says, whichever surface draws it. `hover` is the buttons the pointer reveals while queued.
+    let row: Pill
+    let hover: JSX.Element | null = null
     if (entry === undefined) {
-      if (droppedIds(state).includes(id)) {
-        return (
-          <Box justifyContent="flex-end">
-            <Text dimColor>
-              Removed from the queue
-            </Text>
-          </Box>
-        )
+      if (droppedIds(state).includes(id)) row = { label: 'Removed from the queue', tone: 'm', mark: 'none' }
+      else if (state.boxedId === id) row = { label: 'In the prompt box', tone: 'w', mark: 'dot', status: 'press Enter to send' }
+      else row = { label: 'Sent', tone: 's', mark: 'check' }
+    } else if (entry.status === 'sent') {
+      row = { label: 'Sent', tone: 's', mark: 'check', note: editedText }
+    } else if (!isQueued(entry)) {
+      row = { label: 'Sending…', tone: 'w', mark: 'live', note: editedText }
+    } else {
+      const queued = queuedItems(state)
+      const position = queued.findIndex(x => x.id === id) + 1
+      const status = position === 1 ? waitingOn(state) : `after ${position - 1} more`
+      row = {
+        label: `Queued #${position}`,
+        tone: 'a',
+        mark: 'none',
+        status: `${status}${entry.maybeSent ? ' (may have been sent)' : ''}`,
+        place: { at: position, of: queued.length },
+        note: editedText,
       }
-      if (state.boxedId === id) {
-        return (
-          <Box gap={1} justifyContent="flex-end">
-            {pill('In the prompt box', 'warning')}
-            <Box flexShrink={0}>
-              <Text dimColor>press Enter to send</Text>
-            </Box>
-          </Box>
-        )
-      }
-      return <Box justifyContent="flex-end">{pill('✓ Sent', 'success')}</Box>
-    }
-    if (entry.status === 'sent') {
-      return (
-        <Box gap={1} justifyContent="flex-end">
-          {pill('✓ Sent', 'success')}
-          {edited}
-        </Box>
-      )
-    }
-    if (!isQueued(entry)) {
-      return (
-        <Box gap={1} justifyContent="flex-end">
-          {pill('Sending…', 'warning')}
-          {edited}
-        </Box>
-      )
-    }
-
-    const position = queuedItems(state).findIndex(x => x.id === id) + 1
-    const status = position === 1 ? waitingOn(state) : `after ${position - 1} more`
-    return (
-      <Box key={`reply-${id}`} gap={1} justifyContent="flex-end">
-        {pill(`Queued #${position}`, ACCENT)}
-        <Box flexShrink={0}>
-          <Text dimColor>
-            {status}
-            {entry.maybeSent ? ' (may have been sent)' : ''}
-          </Text>
-        </Box>
-        {edited}
+      hover = (
         <Box display="none" hover={{ display: 'flex' }} gap={1} flexShrink={0}>
           <Button key={`reply-send-${id}`} label="Send now" onPress={() => void sendFromBand($, id)} />
           <Button key={`reply-edit-${id}`} label="Edit" dimColor onPress={() => void editFromBand($, id)} />
           <Button key={`reply-remove-${id}`} label="Remove" dimColor onPress={() => void removeFromBand($, id)} />
         </Box>
+      )
+    }
+    const note = row.note === undefined ? '' : `now: ${row.note}`
+    const label = row.mark === 'check' ? `✓ ${row.label}` : row.label
+
+    // The terminal's element table is completed with an `Svg` that draws nothing: test the surface too.
+    if (e.surface !== 'terminal' && 'Svg' in ui) {
+      const { Svg } = ui
+      const drawing = pillSvg({ ...row, note })
+      const alt = [label, row.status, note].filter(Boolean).join(', ')
+      return (
+        <Box key={`reply-${id}`} gap={1} alignItems="center" justifyContent="flex-end">
+          <Svg source={drawing.source} alt={alt} width={drawing.width} height={PILL_H} />
+          {hover}
+        </Box>
+      )
+    }
+
+    // The terminal: the pill as inverse text in the tone's theme color, the rest dim.
+    const TONE_COLOR = { a: ACCENT, s: 'success', w: 'warning', m: '' } as const
+    if (row.tone === 'm') {
+      return (
+        <Box justifyContent="flex-end">
+          <Text dimColor>{label}</Text>
+        </Box>
+      )
+    }
+    return (
+      <Box key={`reply-${id}`} gap={1} justifyContent="flex-end">
+        <Box flexShrink={0}>
+          <Text backgroundColor={TONE_COLOR[row.tone]} color="inverseText" weight="semibold">
+            {` ${label} `}
+          </Text>
+        </Box>
+        {row.status !== undefined ? (
+          <Box flexShrink={0}>
+            <Text dimColor>{row.status}</Text>
+          </Box>
+        ) : null}
+        {note !== '' ? (
+          <Box flexGrow={1} flexShrink={1} minWidth={0}>
+            <Text wrap="truncate-end" dimColor>
+              {note}
+            </Text>
+          </Box>
+        ) : null}
+        {hover}
       </Box>
     )
   })

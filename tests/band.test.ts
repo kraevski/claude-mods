@@ -30,6 +30,15 @@ const bandProps = {
   view: {},
 } as never
 
+type Found = { findAll: (q: { type: string }) => Promise<{ key?: string; props: Record<string, unknown> }[]> }
+
+// The alt texts of the drawings: on a desktop, each row is one Svg.
+const alts = async (ui: Found) => (await ui.findAll({ type: 'Svg' })).map(x => String(x.props.alt))
+
+// Finds what a row says: a Text on the terminal, a drawing's alt on a desktop.
+const says = async (ui: Found & { find: (q: { type: string; text: RegExp | string }) => Promise<unknown> }, surface: string, text: RegExp) =>
+  surface === 'terminal' ? (await ui.find({ type: 'Text', text })) !== undefined : (await alts(ui)).some(x => text.test(x))
+
 // Finds the key of the first Button with this label.
 const buttonKey = async (ui: { findAll: (q: { type: string }) => Promise<{ key?: string; props: Record<string, unknown> }[]> }, label: string) => {
   const found = (await ui.findAll({ type: 'Button' })).find(x => x.props.label === label)
@@ -47,11 +56,12 @@ for (const surface of ['terminal', 'desktop'] as const) {
     await clock.advance(0)
 
     const ui = await $.ui.mount({ plugin: 'queue', surface, component: 'AbovePrompt', props: bandProps })
-    expect(await ui.find({ type: 'Text', text: /^2 waiting · waiting for 1 background task$/ })).toBeDefined()
-    expect((await ui.find({ type: 'Text', text: 'first' }))?.props.wrap).toBe('truncate-end')
+    expect(await says(ui, surface, /^(Queue: )?2 waiting · waiting for 1 background task$/)).toBe(true)
+    if (surface === 'terminal') expect((await ui.find({ type: 'Text', text: 'first' }))?.props.wrap).toBe('truncate-end')
+    else expect(await alts(ui)).toContain('1. first')
 
     await ui.press({ key: await buttonKey(ui, 'Remove') })
-    expect(await ui.find({ type: 'Text', text: /^1 waiting · waiting for 1 background task$/ })).toBeDefined()
+    expect(await says(ui, surface, /^(Queue: )?1 waiting · waiting for 1 background task$/)).toBe(true)
     await ui.unmount()
   })
 
@@ -190,8 +200,24 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     await $.command.run(queue('pause'))
     const paused = await $.ui.mount({ plugin: 'queue', surface, component: 'AbovePrompt', props: bandProps })
-    expect(await paused.find({ type: 'Text', text: /^0 waiting · paused: you paused it/ })).toBeDefined()
+    expect(await says(paused, surface, /^(Queue: )?0 waiting · paused: you paused it/)).toBe(true)
     await paused.unmount()
+  })
+}
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`the band draws the bands beneath it under its own rows on ${surface}`, async ($, on) => {
+    const clock = mock.clock(on)
+    answerEngine(on)
+    on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Text', children: ['another band'] }) as never)
+    await $.classic.Stop({ stop_hook_active: false, background_tasks: [shell] })
+    await $.command.run(queue('first'))
+    await clock.advance(0)
+
+    const ui = await $.ui.mount({ plugin: 'queue', surface, component: 'AbovePrompt', props: bandProps })
+    expect(await ui.find({ type: 'Text', text: 'another band' })).toBeDefined()
+    expect(await says(ui, surface, /^(Queue: )?1 waiting/)).toBe(true)
+    await ui.unmount()
   })
 }
 
@@ -375,12 +401,12 @@ test('the reply row offers Send now, Edit and Remove, and shows the text once ed
 
   const row = await mountRow()
   expect((await row.findAll({ type: 'Button' })).map(x => x.props.label)).toEqual(['Send now', 'Edit', 'Remove'])
-  expect(await row.find({ type: 'Text', text: /^now: / })).toBeUndefined()
+  expect(await alts(row)).toEqual(['Queued #1, waiting for 1 background task'])
   await row.unmount()
 
   await $.command.run(queue(`edit @${id} final`))
   const edited = await mountRow()
-  expect(await edited.find({ type: 'Text', text: 'now: final' })).toBeDefined()
+  expect(await alts(edited)).toEqual(['Queued #1, waiting for 1 background task, now: final'])
 
   await edited.press({ key: await buttonKey(edited, 'Remove') })
   expect((await $.command.run(queue('list'))).text).toBe('The queue is empty.')

@@ -173,6 +173,32 @@ test('a send that failed is not retried, and the queue stays paused', async ($, 
   expect(calls).toBe(1)
 })
 
+test('a send Claude Code drops stays queued, unflagged, and pauses until resume sends it', async ($, on) => {
+  const clock = mock.clock(on)
+  answerEngine(on)
+  const sent: string[] = []
+  let isDropping = true
+  on('prompt.submit', (_, e) => {
+    if (isDropping) return { drop: 'busy' }
+    sent.push(e.text)
+    return { text: e.text }
+  })
+
+  await $.command.run(queue('first'))
+  await clock.advance(0)
+
+  expect((await $.command.run(queue('list'))).text).toBe(
+    'Paused: Claude Code did not take the last message. /queue resume continues.\n1. first',
+  )
+
+  // No turn started, so no Stop is awaited: resume alone sends it.
+  isDropping = false
+  await $.command.run(queue('resume'))
+  await clock.advance(0)
+
+  expect(sent).toEqual(['first'])
+})
+
 test('/queue rm and /queue up say so when the number is out of range or the move cannot happen', async ($, on) => {
   mock.clock(on)
   answerEngine(on)
