@@ -1,0 +1,14 @@
+{
+  "name": "claude-mods",
+  "owner": {
+    "name": "kraevski"
+  },
+  "description": "Claude Code mods by kraevski.",
+  "plugins": [
+    {
+      "name": "queue",
+      "source": "./",
+      "description": "Adds /queue, which holds messages until Claude is completely finished (turn, subagents, background tasks) and then sends them in order."
+    }
+  ]
+}

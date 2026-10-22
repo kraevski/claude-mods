@@ -1,0 +1,18 @@
+{
+  "name": "queue",
+  "version": "0.2.0",
+  "description": "Adds /queue, which holds messages until Claude is completely finished (turn, subagents, background tasks) and then sends them in order.",
+  "author": {
+    "name": "kraevski"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "joined": {
+      "type": "boolean",
+      "title": "Join queued messages",
+      "description": "Send the waiting messages as one prompt, up to the first queued slash command",
+      "default": false
+    }
+  }
+}
