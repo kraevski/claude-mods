@@ -32,7 +32,9 @@ Under your `/queue` line, a colored `Queued #1` pill shows the message's place a
 
 The band above the prompt shows how many messages wait and what they wait for. It lists the first three, and counts the rest. Each row has **Send now** and **Remove**. Point at a row to get **↑**, **↓** and **Edit** as well. Pointing at a `Queued #n` pill gives Send now, Edit and Remove too. The band is hidden when nothing waits, unless you paused the queue. Other plugins' bands stay in view, under the queue's rows.
 
-In the desktop app, the band and the pill are drawn in the app's own type and colors, light or dark: the band's header shows a slot per waiting message, and each pill shows its message's slot among them.
+In the desktop app, the band and the pill are drawn in the app's own type and colors, light or dark: the band's header shows a slot per waiting message, and each pill shows its message's slot among them. A border frames the band: accent while messages wait, amber while paused.
+
+In the desktop app, text typed while Claude works is held until the turn ends, `/queue` included. So the band shows a "Queue a message" field while Claude works, alone when nothing is queued. It grows from one line to two as you type. Enter there queues the message at once. Edit there opens the message in place, in its band row or its reply row, instead of filling the prompt box.
 
 Queue as many messages as you like. They go out one at a time, in the order you queued them.
 

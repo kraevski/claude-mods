@@ -39,6 +39,10 @@ const alts = async (ui: Found) => (await ui.findAll({ type: 'Svg' })).map(x => S
 const says = async (ui: Found & { find: (q: { type: string; text: RegExp | string }) => Promise<unknown> }, surface: string, text: RegExp) =>
   surface === 'terminal' ? (await ui.find({ type: 'Text', text })) !== undefined : (await alts(ui)).some(x => text.test(x))
 
+// The key of the band's "Queue a message" field, which changes each time it queues a message; undefined without one.
+const fieldKey = async (ui: Found) =>
+  (await ui.findAll({ type: 'Input' })).map(x => x.key).find(k => k?.startsWith('queue-add-') === true)
+
 // Finds the key of the first Button with this label.
 const buttonKey = async (ui: { findAll: (q: { type: string }) => Promise<{ key?: string; props: Record<string, unknown> }[]> }, label: string) => {
   const found = (await ui.findAll({ type: 'Button' })).find(x => x.props.label === label)
@@ -363,7 +367,7 @@ test('the band moves a message with Up and Down, offered only where it can move'
   await ui.unmount()
 })
 
-test('Edit puts the message in the prompt box as a /queue edit by id', async ($, on) => {
+test('Edit on the terminal puts the message in the prompt box as a /queue edit by id', async ($, on) => {
   const clock = mock.clock(on)
   answerEngine(on)
   const filled: string[] = []
@@ -377,7 +381,7 @@ test('Edit puts the message in the prompt box as a /queue edit by id', async ($,
   await clock.advance(0)
   const id = /@([a-z0-9]{4})/.exec(reply.text ?? '')?.[1]
 
-  const ui = await $.ui.mount({ plugin: 'queue', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+  const ui = await $.ui.mount({ plugin: 'queue', surface: 'terminal', component: 'AbovePrompt', props: bandProps })
   await ui.press({ key: await buttonKey(ui, 'Edit') })
   expect(filled).toEqual([`/queue edit @${id} fix me`])
   await ui.unmount()
@@ -411,4 +415,168 @@ test('the reply row offers Send now, Edit and Remove, and shows the text once ed
   await edited.press({ key: await buttonKey(edited, 'Remove') })
   expect((await $.command.run(queue('list'))).text).toBe('The queue is empty.')
   await edited.unmount()
+})
+
+for (const surface of ['terminal', 'desktop'] as const) {
+  test(`the band field is drawn while Claude runs, on desktop only, on ${surface}`, async ($, on) => {
+    mock.clock(on)
+    answerEngine(on)
+    on('turn.start', (_, e) => ({ turnId: e.turnId }))
+
+    // Idle with nothing queued, the band is hidden on every surface.
+    const idle = await $.ui.mount({ plugin: 'queue', surface, component: 'AbovePrompt', props: bandProps }).then(
+      () => 'drawn',
+      err => String(err),
+    )
+    expect(idle).toContain('no implementation for ui.render')
+
+    // Claude is working: the band shows, and the desktop's field is in it.
+    await $.turn.start({ text: '', turnId: 't1' })
+    const running = await $.ui.mount({ plugin: 'queue', surface, component: 'AbovePrompt', props: bandProps }).then(
+      ui => ui,
+      () => undefined,
+    )
+    expect(running !== undefined && (await fieldKey(running)) !== undefined).toBe(surface === 'desktop')
+    // With nothing queued, the desktop's band is the field alone, with no "0 waiting" header.
+    if (surface === 'desktop' && running !== undefined) expect(await alts(running)).toEqual([])
+    await running?.unmount()
+  })
+}
+
+test('the band field queues what is typed while Claude runs, then draws a fresh field', async ($, on) => {
+  mock.clock(on)
+  answerEngine(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await $.turn.start({ text: '', turnId: 't1' })
+
+  const ui = await $.ui.mount({ plugin: 'queue', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+  const first = await fieldKey(ui)
+  await ui.input({ key: first ?? '', text: '  milk  ' })
+  expect((await $.command.run(queue('list'))).text).toBe('1. milk')
+  // A new key: the surface draws an empty field in place of the one that held the text.
+  const second = await fieldKey(ui)
+  expect(second).toBeDefined()
+  expect(second).not.toBe(first)
+  expect(await alts(ui)).toContain('Queue: 1 waiting · waiting for Claude')
+  await ui.unmount()
+})
+
+test('the band field refuses an unknown command, keeps the field as typed, and queues nothing', async ($, on) => {
+  mock.clock(on)
+  answerEngine(on)
+  on('command.list', () => ({
+    value: [{ name: 'compact', description: 'Compact the conversation', source: 'builtin' }],
+  }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await $.turn.start({ text: '', turnId: 't1' })
+
+  const ui = await $.ui.mount({ plugin: 'queue', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+  const key = await fieldKey(ui)
+  await ui.input({ key: key ?? '', text: '/nope' })
+  expect((await $.command.run(queue('list'))).text).toBe('The queue is empty.')
+  // The same key: the surface keeps what was typed, for the person to fix.
+  expect(await fieldKey(ui)).toBe(key)
+  await ui.unmount()
+})
+
+test('Edit in the band opens the message in the field; Save changes it, Cancel leaves it', async ($, on) => {
+  const clock = mock.clock(on)
+  answerEngine(on)
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [shell] })
+  const reply = await $.command.run(queue('fix me'))
+  await clock.advance(0)
+  const id = /@([a-z0-9]{4})/.exec(reply.text ?? '')?.[1] ?? ''
+
+  const ui = await $.ui.mount({ plugin: 'queue', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+  await ui.press({ key: await buttonKey(ui, 'Edit') })
+  expect(await ui.find({ key: `edit-field-${id}` })).toBeDefined()
+  await ui.input({ key: `edit-field-${id}`, text: ' fixed ' })
+  expect((await $.command.run(queue('list'))).text).toBe('1. fixed')
+  expect(await ui.find({ key: `edit-field-${id}` })).toBeUndefined()
+
+  await ui.press({ key: await buttonKey(ui, 'Edit') })
+  await ui.press({ key: `edit-cancel-${id}` })
+  expect(await ui.find({ key: `edit-field-${id}` })).toBeUndefined()
+  expect((await $.command.run(queue('list'))).text).toBe('1. fixed')
+  await ui.unmount()
+})
+
+test('Edit in the reply row opens the message in its row; Save changes it, Cancel leaves it', async ($, on) => {
+  const clock = mock.clock(on)
+  answerEngine(on)
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [shell] })
+  const reply = await $.command.run(queue('draft'))
+  await clock.advance(0)
+  const id = /@([a-z0-9]{4})/.exec(reply.text ?? '')?.[1] ?? ''
+
+  const row = await $.ui.mount({
+    plugin: 'queue',
+    surface: 'desktop',
+    component: 'CommandOutput',
+    props: { command: 'queue', args: 'draft', text: reply.text ?? '', isError: false },
+  } as never)
+  await row.press({ key: `reply-edit-${id}` })
+  expect(await row.find({ key: `edit-field-${id}` })).toBeDefined()
+  // The typed handle leaves `input` out for a reply row, though the desktop draws its field: named here.
+  await (row as unknown as { input: (t: { key: string; text: string }) => Promise<unknown> }).input({
+    key: `edit-field-${id}`,
+    text: 'final',
+  })
+  expect((await $.command.run(queue('list'))).text).toBe('1. final')
+  expect(await row.find({ key: `edit-field-${id}` })).toBeUndefined()
+
+  await row.press({ key: `reply-edit-${id}` })
+  await row.press({ key: `edit-cancel-${id}` })
+  expect(await row.find({ key: `edit-field-${id}` })).toBeUndefined()
+  expect((await $.command.run(queue('list'))).text).toBe('1. final')
+  await row.unmount()
+})
+
+test('the band field starts on one line and grows to two past 20 characters, keeping the text', async ($, on) => {
+  mock.clock(on)
+  answerEngine(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  await $.turn.start({ text: '', turnId: 't1' })
+
+  const ui = await $.ui.mount({ plugin: 'queue', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+  const field = async () => (await ui.findAll({ type: 'Input' })).find(x => x.key?.startsWith('queue-add-') === true)
+  expect((await field())?.props.rows).toBeUndefined()
+
+  await ui.input({ key: (await field())?.key ?? '', text: 'twenty characters ok', kind: 'change' })
+  expect((await field())?.props.rows).toBeUndefined()
+
+  const long = 'twenty-one characters'
+  await ui.input({ key: (await field())?.key ?? '', text: long, kind: 'change' })
+  expect((await field())?.props.rows).toBe(2)
+  expect((await field())?.props.value).toBe(long)
+
+  // Queuing it brings back a fresh one-line field.
+  await ui.input({ key: (await field())?.key ?? '', text: long })
+  expect((await $.command.run(queue('list'))).text).toBe(`1. ${long}`)
+  expect((await field())?.props.rows).toBeUndefined()
+  expect((await field())?.props.value).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the desktop band is framed in the accent while waiting and in amber while paused, and not when only the field shows', async ($, on) => {
+  const clock = mock.clock(on)
+  answerEngine(on)
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  const frame = async (ui: Found) => (await ui.findAll({ type: 'Box' })).find(x => x.props.borderStyle === 'round')
+
+  await $.turn.start({ text: '', turnId: 't1' })
+  const fieldOnly = await $.ui.mount({ plugin: 'queue', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+  expect(await frame(fieldOnly)).toBeUndefined()
+  await fieldOnly.unmount()
+
+  await $.command.run(queue('first'))
+  await clock.advance(0)
+  const waiting = await $.ui.mount({ plugin: 'queue', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+  expect((await frame(waiting))?.props.borderColor).toBe('suggestion')
+  await waiting.unmount()
+
+  await $.command.run(queue('pause'))
+  const paused = await $.ui.mount({ plugin: 'queue', surface: 'desktop', component: 'AbovePrompt', props: bandProps })
+  expect((await frame(paused))?.props.borderColor).toBe('warning')
+  await paused.unmount()
 })

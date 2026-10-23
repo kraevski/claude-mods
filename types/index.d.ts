@@ -26,8 +26,18 @@ export type QueueGate = {
 // put in the prompt box, until the person's next submission sends it.
 export type QueueState = { items: QueueItem[]; gate: QueueGate; removedIds?: string[]; boxedId?: string }
 
+// The message being edited in place on the desktop: its id, and whether the band or the reply row holds the field.
+export type InlineEdit = { id: string; site: 'band' | 'reply' }
+
 declare module 'claude-code' {
   interface PluginState {
-    queue: { queue: QueueState }
+    queue: {
+      queue: QueueState
+      // How many messages the desktop band's field has queued: its key, so each one queued draws a fresh field.
+      fieldUses: number
+      // The text the desktop band's field had when it grew from one line to two; null while it is one line.
+      fieldGrown: string | null
+      editing: InlineEdit | null
+    }
   }
 }

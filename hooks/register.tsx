@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { atom, read } from 'claude-code'
+import { atom, read, update } from 'claude-code'
 
-import type { QueueItem, QueueState } from '../types'
+import type { InlineEdit, QueueItem, QueueState } from '../types'
 import type { Ref } from './command'
 import { parse, refText } from './command'
 import type { Pill, Tone } from './draw'
@@ -63,6 +63,8 @@ const ACCENT = 'suggestion'
 const PX_PER_COLUMN = 8
 const ROW_BUTTONS_PX = 300
 const RESUME_PX = 96
+// The band's border and its padding, on each side together.
+const FRAME_PX = 32
 
 // The `joined` option, read in register: the drain sends the waiting prompts as one message.
 let joined = false
@@ -71,6 +73,21 @@ const stateRef = { plugin: 'queue', key: 'queue' } as const
 
 // The whole queue is one value, so one compare-and-set write moves items and gate together.
 const queue = atom(stateRef, initialState)
+
+// How many messages the desktop band's field has queued. The field's key carries it, so each one queued draws a
+// fresh, empty field. The field's text is never drawn back from state: a redraw arriving after newer keystrokes would
+// otherwise put older text back.
+const fieldUses = atom({ plugin: 'queue', key: 'fieldUses' } as const, 0)
+
+// The desktop draws a one-line field at a fixed short width and a taller one across the band, so the field starts on
+// one line and grows to two once its text passes GROW_AT characters. This holds the text it had when it grew, drawn
+// once into the taller field; null until then, and again once the field queues its message.
+const GROW_AT = 20
+const fieldGrown = atom({ plugin: 'queue', key: 'fieldGrown' } as const, null as string | null)
+
+// The message being edited in place on the desktop, if any. Null when no field is open.
+const editingInitial: InlineEdit | null = null
+const editing = atom({ plugin: 'queue', key: 'editing' } as const, editingInitial)
 
 // Applies `change` to the stored state. A write that lost a race is retried on the newer state.
 // Returns false when `change` declined (undefined), so no write happened.
@@ -251,6 +268,24 @@ const refuseCommand = async ($: EngineInterface, text: string): Promise<string |
 
   const isKnown = (await $.command.list()).some(x => x.name === command)
   return isKnown ? undefined : `No command /${command}. The message was not queued.`
+}
+
+// Queues `text` at the end, as `/queue <text>` does, for the command and the band's field alike. A refused command
+// is not queued, and the refusal says why.
+const enqueue = async ($: EngineInterface, text: string): Promise<{ id: string } | { refusal: string }> => {
+  // Text starting with `/` is a slash command, sent to the command rather than as the person's words.
+  const kind = text.startsWith('/') ? 'command' : 'prompt'
+  if (kind === 'command') {
+    const refusal = await refuseCommand($, text)
+    if (refusal !== undefined) return { refusal }
+  }
+
+  // The reply names the message by id, so the row can tell it apart from one with the same text.
+  // Commands run one at a time, so no other message can take the id between this read and the write.
+  const id = newId(await read($, queue))
+  await modify($, s => add(s, { id, text, kind, status: 'waiting', createdAt: Date.now() }))
+  scheduleDrain($)
+  return { id }
 }
 
 // Releases the next item if the gate is open. Called from events only, never from a poll.
@@ -434,19 +469,9 @@ export const register: Register = (on, options) => {
       case 'message': {
         if (command.text === '') return answer(USAGE)
 
-        // Text starting with `/` is a slash command, sent to the command rather than as the person's words.
-        const kind = command.text.startsWith('/') ? 'command' : 'prompt'
-        if (kind === 'command') {
-          const refusal = await refuseCommand($, command.text)
-          if (refusal !== undefined) return answer(refusal)
-        }
-
-        // The reply names the message by id, so the row can tell it apart from one with the same text.
-        // Commands run one at a time, so no other message can take the id between this read and the write.
-        const id = newId(await read($, queue))
-        await modify($, s => add(s, { id, text: command.text, kind, status: 'waiting', createdAt: Date.now() }))
-        scheduleDrain($)
-        return answer(`Queued @${id}: ${command.text}`)
+        const queued = await enqueue($, command.text)
+        if ('refusal' in queued) return answer(queued.refusal)
+        return answer(`Queued @${queued.id}: ${command.text}`)
       }
 
       case 'list':
@@ -519,17 +544,24 @@ export const register: Register = (on, options) => {
 
     const state = await read($, queue)
     const queued = queuedItems(state)
-    // Empty, the band stays hidden unless the person paused on purpose.
-    if (queued.length === 0 && state.gate.paused !== 'user') return next(e)
+    const ui = $.ui.resolve(e)
+    // The desktop's text field, where the element table has one. The terminal and mobile have none.
+    const Field = e.surface !== 'terminal' && 'Input' in ui && 'Svg' in ui ? ui.Input : undefined
+    // While Claude works the band shows even when empty, so the field is there to type into.
+    const isRunning = state.gate.mainTurn === 'running'
+    // Empty, the band stays hidden unless the person paused on purpose, or Claude works on a surface with the field.
+    if (queued.length === 0 && state.gate.paused !== 'user' && !(Field !== undefined && isRunning)) return next(e)
 
     // Claude Code's own placeholder ({ type: 'engine' }) is never nested: the desktop drops a band that nests it.
     const drawn = await Promise.resolve(next(e)).catch(() => null)
     const below = drawn && typeof drawn === 'object' && (drawn as { type?: string }).type !== 'engine' ? drawn : null
 
-    const ui = $.ui.resolve(e)
     const { Box, Button, Text } = ui
     const shown = queued.slice(0, BAND_ROWS)
     const summary = `${queued.length} waiting · ${waitingOn(state)}`
+    const editingNow = await read($, editing)
+    const isEditingHere = (id: string): boolean =>
+      Field !== undefined && editingNow !== null && editingNow.id === id && editingNow.site === 'band'
     const resumeButton =
       state.gate.paused !== undefined ? (
         <Button key="resume" label="Resume" variant="primary" onPress={() => void resumeFromBand($)} />
@@ -541,7 +573,12 @@ export const register: Register = (on, options) => {
           {i < queued.length - 1 ? (
             <Button key={`down-${x.id}`} label="↓" dimColor onPress={() => void moveFromBand($, x.id, 1)} />
           ) : null}
-          <Button key={`edit-${x.id}`} label="Edit" dimColor onPress={() => void editFromBand($, x.id)} />
+          <Button
+            key={`edit-${x.id}`}
+            label="Edit"
+            dimColor
+            onPress={() => void startEdit($, x.id, 'band', Field !== undefined)}
+          />
         </Box>
         <Button
           key={`send-${x.id}`}
@@ -561,35 +598,82 @@ export const register: Register = (on, options) => {
       const isLive =
         state.gate.paused === undefined &&
         (state.gate.mainTurn === 'running' || state.gate.awaitingStop || state.gate.backgroundTasks.length > 0)
-      const headerW = slot - (resumeButton ? RESUME_PX : 0)
-      const rowW = Math.max(160, slot - ROW_BUTTONS_PX)
+      const uses = await read($, fieldUses)
+      const grown = await read($, fieldGrown)
+      // With nothing queued and no pause, the band is the field alone: a header would only say "0 waiting", and a
+      // border around one field would only add weight. Otherwise a border in the state's color frames the queue.
+      const hasHeader = queued.length > 0 || state.gate.paused !== undefined
+      const inner = slot - (hasHeader ? FRAME_PX : 0)
+      const headerW = inner - (resumeButton ? RESUME_PX : 0)
+      const rowW = Math.max(160, inner - ROW_BUTTONS_PX)
       return (
         <Box flexDirection="column" gap={1}>
-          <Box alignItems="center" justifyContent="space-between" gap={1}>
-            <Svg
-              source={headerSvg(headerW, queued.length, summary, tone, isLive)}
-              alt={`Queue: ${summary}`}
-              width={headerW}
-              height={HEADER_H}
-            />
-            {resumeButton}
-          </Box>
-          {shown.map((x, i) => (
-            <Box key={x.id} alignItems="center" justifyContent="space-between" gap={1}>
-              <Svg
-                source={rowSvg(rowW, i + 1, x.text, {
-                  isCommand: x.kind === 'command',
-                  isDim: x.status !== 'waiting',
-                  maybeSent: x.maybeSent === true,
-                })}
-                alt={`${i + 1}. ${x.text}${x.maybeSent ? ' (may have been sent)' : ''}`}
-                width={rowW}
-                height={ROW_H}
+          <Box
+            flexDirection="column"
+            gap={1}
+            borderStyle={hasHeader ? 'round' : undefined}
+            borderColor={tone === 'w' ? 'warning' : ACCENT}
+            paddingX={hasHeader ? 1 : 0}
+          >
+            {hasHeader ? (
+              <Box alignItems="center" justifyContent="space-between" gap={1}>
+                <Svg
+                  source={headerSvg(headerW, queued.length, summary, tone, isLive)}
+                  alt={`Queue: ${summary}`}
+                  width={headerW}
+                  height={HEADER_H}
+                />
+                {resumeButton}
+              </Box>
+            ) : null}
+            {shown.map((x, i) =>
+              Field !== undefined && isEditingHere(x.id) ? (
+                // Edited in place: the text field replaces the row's drawing, Cancel its buttons.
+                <Box key={x.id} alignItems="center" gap={1}>
+                  <Box flexGrow={1} minWidth={0}>
+                    <Field
+                      key={`edit-field-${x.id}`}
+                      value={x.text}
+                      submitLabel="Save"
+                      rows={2}
+                      autoFocus
+                      onSubmit={value => void saveEdit($, x.id, value)}
+                    />
+                  </Box>
+                  <Button key={`edit-cancel-${x.id}`} label="Cancel" dimColor onPress={() => void closeEdit($)} />
+                </Box>
+              ) : (
+                <Box key={x.id} alignItems="center" justifyContent="space-between" gap={1}>
+                  <Svg
+                    source={rowSvg(rowW, i + 1, x.text, {
+                      isCommand: x.kind === 'command',
+                      isDim: x.status !== 'waiting',
+                      maybeSent: x.maybeSent === true,
+                    })}
+                    alt={`${i + 1}. ${x.text}${x.maybeSent ? ' (may have been sent)' : ''}`}
+                    width={rowW}
+                    height={ROW_H}
+                  />
+                  {rowButtons(x, i)}
+                </Box>
+              ),
+            )}
+            {queued.length > BAND_ROWS ? <Text dimColor>+{queued.length - BAND_ROWS} more</Text> : null}
+            {Field !== undefined ? (
+              // The last row: a message typed here is queued at once, so it can wait out the turn Claude is running.
+              <Field
+                key={`queue-add-${uses}`}
+                placeholder="Queue a message…"
+                submitLabel="Queue"
+                rows={grown === null ? undefined : 2}
+                value={grown ?? undefined}
+                onInput={value => {
+                  if (grown === null && value.length > GROW_AT) void update($, fieldGrown, prev => prev ?? value)
+                }}
+                onSubmit={value => void submitField($, value)}
               />
-              {rowButtons(x, i)}
-            </Box>
-          ))}
-          {queued.length > BAND_ROWS ? <Text dimColor>+{queued.length - BAND_ROWS} more</Text> : null}
+            ) : null}
+          </Box>
           {below}
         </Box>
       )
@@ -657,6 +741,9 @@ export const register: Register = (on, options) => {
     const ui = $.ui.resolve(e)
     const { Box, Button, Text } = ui
     const editedText = entry !== undefined && entry.text !== queuedText ? entry.text : undefined
+    const Field = e.surface !== 'terminal' && 'Input' in ui && 'Svg' in ui ? ui.Input : undefined
+    const editingNow = await read($, editing)
+    const isEditingHere = editingNow?.id === id && editingNow.site === 'reply'
 
     // What the row says, whichever surface draws it. `hover` is the buttons the pointer reveals while queued.
     let row: Pill
@@ -684,7 +771,12 @@ export const register: Register = (on, options) => {
       hover = (
         <Box display="none" hover={{ display: 'flex' }} gap={1} flexShrink={0}>
           <Button key={`reply-send-${id}`} label="Send now" onPress={() => void sendFromBand($, id)} />
-          <Button key={`reply-edit-${id}`} label="Edit" dimColor onPress={() => void editFromBand($, id)} />
+          <Button
+            key={`reply-edit-${id}`}
+            label="Edit"
+            dimColor
+            onPress={() => void startEdit($, id, 'reply', Field !== undefined)}
+          />
           <Button key={`reply-remove-${id}`} label="Remove" dimColor onPress={() => void removeFromBand($, id)} />
         </Box>
       )
@@ -697,6 +789,24 @@ export const register: Register = (on, options) => {
       const { Svg } = ui
       const drawing = pillSvg({ ...row, note })
       const alt = [label, row.status, note].filter(Boolean).join(', ')
+      // Edited in place: the field and Cancel replace the pill while the message is still queued.
+      if (Field !== undefined && isEditingHere && entry !== undefined && isQueued(entry)) {
+        return (
+          <Box key={`reply-${id}`} gap={1} alignItems="center" justifyContent="flex-end">
+            <Box flexGrow={1} minWidth={0}>
+              <Field
+                key={`edit-field-${id}`}
+                value={entry.text}
+                submitLabel="Save"
+                rows={2}
+                autoFocus
+                onSubmit={value => void saveEdit($, id, value)}
+              />
+            </Box>
+            <Button key={`edit-cancel-${id}`} label="Cancel" dimColor onPress={() => void closeEdit($)} />
+          </Box>
+        )
+      }
       return (
         <Box key={`reply-${id}`} gap={1} alignItems="center" justifyContent="flex-end">
           <Svg source={drawing.source} alt={alt} width={drawing.width} height={PILL_H} />
@@ -755,6 +865,38 @@ const editFromBand = async ($: EngineInterface, id: string): Promise<void> => {
 
   const outcome = await fillBox($, `/queue edit @${item.id} ${item.text}`)
   if (outcome !== 'filled') refuseFill($, outcome)
+}
+
+// Edit on the desktop opens the message in its own row; the terminal and mobile fill the prompt box instead.
+const startEdit = async ($: EngineInterface, id: string, site: InlineEdit['site'], inline: boolean): Promise<void> => {
+  if (!inline) return editFromBand($, id)
+  await update($, editing, () => ({ id, site }))
+}
+
+// Saves an inline edit: the trimmed text when it is non-empty and changed. The field closes either way.
+const saveEdit = async ($: EngineInterface, id: string, value: string): Promise<void> => {
+  const text = value.trim()
+  const item = findQueued(await read($, queue), { id })
+  if (item !== undefined && text !== '' && text !== item.text) await modify($, s => editItem(s, id, text))
+  await closeEdit($)
+}
+
+const closeEdit = async ($: EngineInterface): Promise<void> => {
+  await update($, editing, () => null)
+}
+
+// The band's field: a trimmed message is queued as `/queue <message>` queues it. A refusal keeps the field as typed.
+const submitField = async ($: EngineInterface, value: string): Promise<void> => {
+  const text = value.trim()
+  if (text === '') return
+
+  const queued = await enqueue($, text)
+  if ('refusal' in queued) {
+    void $.ui.toast(queued.refusal)
+    return
+  }
+  await update($, fieldUses, n => n + 1)
+  await update($, fieldGrown, () => null)
 }
 
 const removeFromBand = async ($: EngineInterface, id: string): Promise<void> => {
