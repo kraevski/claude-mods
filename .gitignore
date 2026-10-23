@@ -1,5 +1,6 @@
 .claude-plugin/types/
 .claude/types/
+.claude/settings.local.json
 node_modules/
 .DS_Store
 notes/

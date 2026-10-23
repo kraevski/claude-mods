@@ -38,6 +38,24 @@ In the desktop app, text typed while Claude works is held until the turn ends, `
 
 Queue as many messages as you like. They go out one at a time, in the order you queued them.
 
+### Looks like
+
+In action:
+
+![Queue in action](docs/queue.gif)
+
+The band above the prompt, with the row buttons revealed on hover:
+
+![Queue band with hover buttons](docs/band-hover-functions.png)
+
+A longer message in the band:
+
+![Queue band with a longer message](docs/band-longer-message.png)
+
+While Claude works and nothing is queued, the band is just the message field:
+
+![Empty queue field](docs/band-empty-field.png)
+
 ### Commands
 
 `<n>` is a message's position among the waiting messages. `@<id>` names it by its id instead, which stays the same as the positions change. `/queue edit` uses ids.
