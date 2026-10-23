@@ -4,6 +4,24 @@
 
 A message you type while Claude is working goes into the turn that is running. `/queue <message>` holds the message instead and sends it only when Claude is done, including any subagents and background tasks still working. You can line up the next step, or several, while a long task runs.
 
+## How it looks like in Claude Desktop app
+
+In action:
+
+![Queue in action](docs/queue.gif)
+
+The band above the prompt, with the row buttons revealed on hover:
+
+![Queue band with hover buttons](docs/band-hover-functions.png)
+
+A longer message in the band:
+
+![Queue band with a longer message](docs/band-longer-message.png)
+
+While Claude works and nothing is queued, the band is just the message field:
+
+![Empty queue field](docs/band-empty-field.png)
+
 ## Install
 
 At the prompt of a terminal session:
@@ -37,24 +55,6 @@ In the desktop app, the band and the pill are drawn in the app's own type and co
 In the desktop app, text typed while Claude works is held until the turn ends, `/queue` included. So the band shows a "Queue a message" field while Claude works, alone when nothing is queued. It grows from one line to two as you type. Enter there queues the message at once. Edit there opens the message in place, in its band row or its reply row, instead of filling the prompt box.
 
 Queue as many messages as you like. They go out one at a time, in the order you queued them.
-
-### Looks like
-
-In action:
-
-![Queue in action](docs/queue.gif)
-
-The band above the prompt, with the row buttons revealed on hover:
-
-![Queue band with hover buttons](docs/band-hover-functions.png)
-
-A longer message in the band:
-
-![Queue band with a longer message](docs/band-longer-message.png)
-
-While Claude works and nothing is queued, the band is just the message field:
-
-![Empty queue field](docs/band-empty-field.png)
 
 ### Commands
 
